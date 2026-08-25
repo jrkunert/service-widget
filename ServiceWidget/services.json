@@ -1,0 +1,6 @@
+{
+  "services": [
+    "Spooler",
+    "wuauserv"
+  ]
+}
