@@ -95,8 +95,8 @@ $TitleColor   = [System.Drawing.Color]::FromArgb(30, 30, 30)
 $CloseColor   = [System.Drawing.Color]::FromArgb(90, 90, 90)
 $LabelColor   = [System.Drawing.Color]::FromArgb(30, 30, 30)
 $LinkColor    = [System.Drawing.Color]::FromArgb(0, 102, 204)
-$RunningColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
-$StoppedColor = [System.Drawing.Color]::FromArgb(231, 76, 60)
+$RunningColor = [System.Drawing.Color]::FromArgb(0, 200, 0)
+$StoppedColor = [System.Drawing.Color]::FromArgb(220, 0, 0)
 $DimColor     = [System.Drawing.Color]::FromArgb(90, 90, 90)
 
 # ---------- form shell ----------
