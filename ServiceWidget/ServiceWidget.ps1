@@ -86,14 +86,15 @@ function Show-Err($msg) {
 # ---------- layout constants ----------
 $WidgetWidth  = 230
 $Padding      = 10
-$HeaderHeight = 26
+$HeaderHeight = 42
 $RowHeight    = 24
 
-$BackColor    = [System.Drawing.Color]::FromArgb(43, 43, 43)
-$BorderColor  = [System.Drawing.Color]::FromArgb(68, 68, 68)
-$TitleColor   = [System.Drawing.Color]::FromArgb(221, 221, 221)
-$CloseColor   = [System.Drawing.Color]::FromArgb(170, 170, 170)
-$LabelColor   = [System.Drawing.Color]::FromArgb(238, 238, 238)
+$BackColor    = [System.Drawing.Color]::FromArgb(211, 211, 211)
+$BorderColor  = [System.Drawing.Color]::FromArgb(150, 150, 150)
+$TitleColor   = [System.Drawing.Color]::FromArgb(30, 30, 30)
+$CloseColor   = [System.Drawing.Color]::FromArgb(90, 90, 90)
+$LabelColor   = [System.Drawing.Color]::FromArgb(30, 30, 30)
+$LinkColor    = [System.Drawing.Color]::FromArgb(0, 102, 204)
 $RunningColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
 $StoppedColor = [System.Drawing.Color]::FromArgb(231, 76, 60)
 $DimColor     = [System.Drawing.Color]::FromArgb(90, 90, 90)
@@ -183,16 +184,47 @@ $closeLabel.Location  = New-Object System.Drawing.Point(($WidgetWidth - 24), 6)
 $titleBar.Controls.Add($closeLabel)
 $closeLabel.Add_Click({ $form.Close() })
 
+$editLabel = New-Object System.Windows.Forms.Label
+$editLabel.Text      = 'Edit List'
+$editLabel.ForeColor = $LinkColor
+$editLabel.Font      = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Underline)
+$editLabel.AutoSize  = $true
+$editLabel.Cursor    = [System.Windows.Forms.Cursors]::Hand
+$editLabel.Location  = New-Object System.Drawing.Point($Padding, 24)
+$titleBar.Controls.Add($editLabel)
+$editLabel.Add_Click({
+    try { Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$ConfigPath`"" }
+    catch { Show-Err "Could not open services.json:`n$($_.Exception.Message)" }
+})
+
 # ---------- helpers ----------
 function New-Light {
     $p = New-Object System.Windows.Forms.Panel
-    $p.Width  = 14
-    $p.Height = 14
-    $p.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $path.AddEllipse(0, 0, 14, 14)
-    $p.Region    = New-Object System.Drawing.Region($path)
-    $p.BackColor = $DimColor
+    $p.Width     = 14
+    $p.Height    = 14
+    $p.Cursor    = [System.Windows.Forms.Cursors]::Hand
+    $p.BackColor = $BackColor
+    $p | Add-Member -NotePropertyName LedColor -NotePropertyValue $DimColor
+    $p.Add_Paint({
+        param($s, $e)
+        $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+
+        $bezel = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(40, 40, 40))
+        $g.FillEllipse($bezel, 0, 0, $s.Width, $s.Height)
+        $bezel.Dispose()
+
+        $inner = New-Object System.Drawing.Rectangle(1, 1, ($s.Width - 3), ($s.Height - 3))
+        $path  = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $path.AddEllipse($inner)
+        $glossBrush = New-Object System.Drawing.Drawing2D.PathGradientBrush($path)
+        $glossBrush.CenterPoint  = New-Object System.Drawing.PointF(($inner.X + $inner.Width * 0.32), ($inner.Y + $inner.Height * 0.3))
+        $glossBrush.CenterColor  = [System.Drawing.Color]::FromArgb(255, 255, 255)
+        $glossBrush.SurroundColors = @($s.LedColor)
+        $g.FillPath($glossBrush, $path)
+        $glossBrush.Dispose()
+        $path.Dispose()
+    })
     return $p
 }
 
@@ -202,8 +234,10 @@ function Update-Row($row) {
 
     if (-not $svc) {
         $row.Label.Text = "$($row.Name) (not found)"
-        $row.Green.BackColor = $DimColor
-        $row.Red.BackColor   = $DimColor
+        $row.Green.LedColor = $DimColor
+        $row.Red.LedColor   = $DimColor
+        $row.Green.Invalidate()
+        $row.Red.Invalidate()
         $row.Status = 'Unknown'
         return
     }
@@ -211,18 +245,20 @@ function Update-Row($row) {
     $row.Status = $svc.Status.ToString()
     switch ($svc.Status) {
         'Running' {
-            $row.Green.BackColor = $RunningColor
-            $row.Red.BackColor   = $DimColor
+            $row.Green.LedColor = $RunningColor
+            $row.Red.LedColor   = $DimColor
         }
         'Stopped' {
-            $row.Green.BackColor = $DimColor
-            $row.Red.BackColor   = $StoppedColor
+            $row.Green.LedColor = $DimColor
+            $row.Red.LedColor   = $StoppedColor
         }
         default {
-            $row.Green.BackColor = $DimColor
-            $row.Red.BackColor   = $DimColor
+            $row.Green.LedColor = $DimColor
+            $row.Red.LedColor   = $DimColor
         }
     }
+    $row.Green.Invalidate()
+    $row.Red.Invalidate()
     $row.Label.Text = $svc.DisplayName
     $toolTip = $row.ToolTip
     $toolTip.SetToolTip($row.Green, "Start / Restart '$($svc.DisplayName)'  (currently: $($svc.Status))")
