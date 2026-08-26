@@ -4,6 +4,13 @@
     Windows services. Click the green light to start/restart a service,
     click the red light to stop it.
 
+    Built on Windows Forms (GDI), not WPF: on this org's VDI image, WPF's
+    DirectX/DXGI present pipeline never actually hands frames to the desktop
+    compositor - the window is created, reports ContentRendered, and shows up
+    in Alt-Tab, but nothing ever paints on screen (confirmed even with WPF's
+    software-rendering fallback forced on). Plain WinForms/GDI rendering does
+    not depend on that pipeline and paints correctly in the same session.
+
     Service list  : services.json  (edit this to add/remove services)
     Window position: position.json (auto-saved on close/move)
 #>
@@ -14,7 +21,7 @@ $PositionPath = Join-Path $ScriptDir 'position.json'
 $LogPath      = Join-Path $ScriptDir 'diag.log'
 $RefreshMs    = 4000
 
-# Plain file I/O only - no WPF dependency - so this works even if assembly
+# Plain file I/O only - no GUI dependency - so this works even if assembly
 # loading itself is what's failing. Since the script always ends up running
 # hidden, this log is the only way to see what happened.
 function Write-Diag($msg) {
@@ -24,23 +31,16 @@ function Write-Diag($msg) {
 trap {
     Write-Diag "FATAL: $($_.Exception.GetType().FullName): $($_.Exception.Message)`n$($_.ScriptStackTrace)"
     try {
-        Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
-        [System.Windows.MessageBox]::Show("Service Widget hit an unexpected error and is closing:`n$($_.Exception.Message)`n`nDetails were logged to:`n$LogPath", 'Service Widget - Error', 'OK', 'Error') | Out-Null
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        [System.Windows.Forms.MessageBox]::Show("Service Widget hit an unexpected error and is closing:`n$($_.Exception.Message)`n`nDetails were logged to:`n$LogPath", 'Service Widget - Error', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     } catch { }
     break
 }
 
 Write-Diag "=== Script starting. PID=$PID  PSVersion=$($PSVersionTable.PSVersion)  Is64BitProcess=$([Environment]::Is64BitProcess) ==="
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
-Write-Diag "WPF assemblies loaded OK"
-
-# Force software rendering. On some remote/VDI/GPU-less sessions, WPF's default
-# hardware-accelerated pipeline reports the window as loaded/visible/rendered
-# (that's just window-manager bookkeeping) but never actually presents a frame
-# to the real display, so nothing appears on screen. This bypasses that pipeline.
-[System.Windows.Media.RenderOptions]::ProcessRenderMode = [System.Windows.Interop.RenderMode]::SoftwareOnly
-Write-Diag "Forced ProcessRenderMode=SoftwareOnly"
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Write-Diag "WinForms assemblies loaded OK"
 
 # ---------- always run elevated ----------
 $IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -49,7 +49,7 @@ Write-Diag "IsElevated=$IsElevated"
 if (-not $IsElevated) {
     if (-not $PSCommandPath) {
         Write-Diag "No PSCommandPath - cannot self-relaunch. Aborting."
-        [System.Windows.MessageBox]::Show("This script needs to be run from a .ps1 file (not pasted/selected) so it can relaunch itself elevated.", 'Service Widget', 'OK', 'Warning') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("This script needs to be run from a .ps1 file (not pasted/selected) so it can relaunch itself elevated.", 'Service Widget', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         return
     }
     try {
@@ -60,7 +60,7 @@ if (-not $IsElevated) {
         Write-Diag "Relaunch Start-Process call returned without throwing. Non-elevated instance exiting now."
     } catch {
         Write-Diag "Relaunch FAILED: $($_.Exception.Message)"
-        [System.Windows.MessageBox]::Show("Elevation was cancelled or failed, so the widget can't start:`n$($_.Exception.Message)", 'Service Widget', 'OK', 'Warning') | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("Elevation was cancelled or failed, so the widget can't start:`n$($_.Exception.Message)", 'Service Widget', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
     }
     return
 }
@@ -75,88 +75,125 @@ try {
     $config = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
     $ServiceNames = @($config.services)
 } catch {
-    [System.Windows.MessageBox]::Show("Could not read services.json:`n$($_.Exception.Message)", 'Service Widget', 'OK', 'Error') | Out-Null
+    [System.Windows.Forms.MessageBox]::Show("Could not read services.json:`n$($_.Exception.Message)", 'Service Widget', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
     $ServiceNames = @()
 }
 
-# ---------- xaml shell ----------
-# NOTE: no AllowsTransparency/transparent background here - layered/transparent
-# windows frequently fail to render over RDP/Citrix/VDI display drivers, which
-# shows up as "the process runs but no window ever appears". Solid background instead.
-[xml]$xamlDoc = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Service Widget" Width="230" Background="#2B2B2B"
-        WindowStyle="None"
-        Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" SizeToContent="Height">
-    <Border x:Name="Chrome" BorderBrush="#444444" BorderThickness="1" Padding="10">
-        <StackPanel>
-            <Grid x:Name="TitleBar" Margin="0,0,0,6">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Text="Services" Foreground="#DDDDDD" FontWeight="Bold" FontSize="12" VerticalAlignment="Center"/>
-                <TextBlock x:Name="CloseButton" Grid.Column="1" Text="&#x2715;" Foreground="#AAAAAA" FontSize="12" Cursor="Hand" VerticalAlignment="Center" Padding="8,0,0,0"/>
-            </Grid>
-            <StackPanel x:Name="ServicesPanel"/>
-        </StackPanel>
-    </Border>
-</Window>
-'@
+function Show-Err($msg) {
+    [System.Windows.Forms.MessageBox]::Show($msg, 'Service Widget', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+}
 
-$reader = [System.Xml.XmlNodeReader]::new($xamlDoc)
-$window = [Windows.Markup.XamlReader]::Load($reader)
-Write-Diag "XAML window object created OK"
+# ---------- layout constants ----------
+$WidgetWidth  = 230
+$Padding      = 10
+$HeaderHeight = 26
+$RowHeight    = 24
 
-$Chrome        = $window.FindName('Chrome')
-$CloseButton   = $window.FindName('CloseButton')
-$ServicesPanel = $window.FindName('ServicesPanel')
+$BackColor    = [System.Drawing.Color]::FromArgb(43, 43, 43)
+$BorderColor  = [System.Drawing.Color]::FromArgb(68, 68, 68)
+$TitleColor   = [System.Drawing.Color]::FromArgb(221, 221, 221)
+$CloseColor   = [System.Drawing.Color]::FromArgb(170, 170, 170)
+$LabelColor   = [System.Drawing.Color]::FromArgb(238, 238, 238)
+$RunningColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
+$StoppedColor = [System.Drawing.Color]::FromArgb(231, 76, 60)
+$DimColor     = [System.Drawing.Color]::FromArgb(90, 90, 90)
 
-# ---------- window position ----------
-$wa = [System.Windows.SystemParameters]::WorkArea
-Write-Diag "SystemParameters: WorkArea=$wa  VirtualScreen=($([System.Windows.SystemParameters]::VirtualScreenLeft),$([System.Windows.SystemParameters]::VirtualScreenTop)) size $($([System.Windows.SystemParameters]::VirtualScreenWidth))x$($([System.Windows.SystemParameters]::VirtualScreenHeight))  PrimaryScreen=$($([System.Windows.SystemParameters]::PrimaryScreenWidth))x$($([System.Windows.SystemParameters]::PrimaryScreenHeight))"
-$window.Left = $wa.Right - 260
-$window.Top  = $wa.Top + 20
+# ---------- form shell ----------
+$form = New-Object System.Windows.Forms.Form
+$form.Text            = 'Service Widget'
+$form.FormBorderStyle = 'None'
+$form.StartPosition   = 'Manual'
+$form.TopMost         = $true
+$form.ShowInTaskbar   = $false
+$form.BackColor       = $BackColor
+$form.Width           = $WidgetWidth
+$form.Height          = $HeaderHeight + ($ServiceNames.Count * $RowHeight) + $Padding + 6
+
+$form.Add_Paint({
+    param($s, $e)
+    $pen = New-Object System.Drawing.Pen($BorderColor)
+    $e.Graphics.DrawRectangle($pen, 0, 0, $form.Width - 1, $form.Height - 1)
+    $pen.Dispose()
+})
+
+# ---------- window position (WinForms Screen API handles multi-monitor better than WPF's SystemParameters) ----------
+$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+Write-Diag "Screen: PrimaryScreen.WorkingArea=$wa  AllScreens=$([System.Windows.Forms.Screen]::AllScreens.Count)"
+$form.Left = $wa.Right - $WidgetWidth - 30
+$form.Top  = $wa.Top + 20
 if (Test-Path $PositionPath) {
     try {
         $pos = Get-Content -Path $PositionPath -Raw | ConvertFrom-Json
-        if ($pos.Left -ne $null) { $window.Left = [double]$pos.Left }
-        if ($pos.Top  -ne $null) { $window.Top  = [double]$pos.Top }
+        if ($null -ne $pos.Left) { $form.Left = [int]$pos.Left }
+        if ($null -ne $pos.Top)  { $form.Top  = [int]$pos.Top }
     } catch { }
 }
-Write-Diag "Planned window position: Left=$($window.Left) Top=$($window.Top)"
+Write-Diag "Planned window position: Left=$($form.Left) Top=$($form.Top)"
 
-$window.Add_Loaded({ Write-Diag "Window Loaded event: ActualWidth=$($window.ActualWidth) ActualHeight=$($window.ActualHeight) Left=$($window.Left) Top=$($window.Top) Visibility=$($window.Visibility) WindowState=$($window.WindowState) IsVisible=$($window.IsVisible)" })
-$window.Add_ContentRendered({ Write-Diag "Window ContentRendered event fired - it should be painting on screen now." })
-
-$Chrome.Add_MouseLeftButtonDown({ $window.DragMove() })
-$CloseButton.Add_MouseLeftButtonUp({ $window.Close() })
-
-$window.Add_Closing({
-    $pos = @{ Left = $window.Left; Top = $window.Top }
+$form.Add_Shown({ Write-Diag "Form Shown event fired: Bounds=$($form.Bounds) Visible=$($form.Visible)" })
+$form.Add_FormClosing({
+    $pos = @{ Left = $form.Left; Top = $form.Top }
     $pos | ConvertTo-Json | Set-Content -Path $PositionPath -Encoding UTF8
 })
 
-# ---------- helpers ----------
-$RunningBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(46, 204, 113))
-$StoppedBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(231, 76, 60))
-$DimGray      = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(90, 90, 90))
-$StrokeBrush  = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(34, 34, 34))
+# ---------- title bar (drag + close) ----------
+$script:Dragging  = $false
+$script:DragStart = New-Object System.Drawing.Point 0, 0
 
-function New-Ellipse {
-    $e = New-Object System.Windows.Shapes.Ellipse
-    $e.Width = 14
-    $e.Height = 14
-    $e.Margin = '4,0,0,0'
-    $e.Stroke = $StrokeBrush
-    $e.StrokeThickness = 0.6
-    $e.Cursor = 'Hand'
-    return $e
+$dragDown = {
+    param($s, $e)
+    $script:Dragging  = $true
+    $script:DragStart = New-Object System.Drawing.Point($e.X, $e.Y)
 }
+$dragMove = {
+    param($s, $e)
+    if ($script:Dragging) {
+        $form.Left += $e.X - $script:DragStart.X
+        $form.Top  += $e.Y - $script:DragStart.Y
+    }
+}
+$dragUp = { $script:Dragging = $false }
 
-function Show-Err($msg) {
-    [System.Windows.MessageBox]::Show($msg, 'Service Widget', 'OK', 'Error') | Out-Null
+$titleBar = New-Object System.Windows.Forms.Panel
+$titleBar.Height    = $HeaderHeight
+$titleBar.Dock      = 'Top'
+$titleBar.BackColor = $BackColor
+$form.Controls.Add($titleBar)
+$titleBar.Add_MouseDown($dragDown)
+$titleBar.Add_MouseMove($dragMove)
+$titleBar.Add_MouseUp($dragUp)
+
+$titleLabel = New-Object System.Windows.Forms.Label
+$titleLabel.Text      = 'Services'
+$titleLabel.ForeColor = $TitleColor
+$titleLabel.Font      = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+$titleLabel.AutoSize  = $true
+$titleLabel.Location  = New-Object System.Drawing.Point($Padding, 6)
+$titleBar.Controls.Add($titleLabel)
+$titleLabel.Add_MouseDown($dragDown)
+$titleLabel.Add_MouseMove($dragMove)
+$titleLabel.Add_MouseUp($dragUp)
+
+$closeLabel = New-Object System.Windows.Forms.Label
+$closeLabel.Text      = [char]0x2715
+$closeLabel.ForeColor = $CloseColor
+$closeLabel.AutoSize  = $true
+$closeLabel.Cursor    = [System.Windows.Forms.Cursors]::Hand
+$closeLabel.Location  = New-Object System.Drawing.Point(($WidgetWidth - 24), 6)
+$titleBar.Controls.Add($closeLabel)
+$closeLabel.Add_Click({ $form.Close() })
+
+# ---------- helpers ----------
+function New-Light {
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Width  = 14
+    $p.Height = 14
+    $p.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $path.AddEllipse(0, 0, 14, 14)
+    $p.Region    = New-Object System.Drawing.Region($path)
+    $p.BackColor = $DimColor
+    return $p
 }
 
 function Update-Row($row) {
@@ -165,8 +202,8 @@ function Update-Row($row) {
 
     if (-not $svc) {
         $row.Label.Text = "$($row.Name) (not found)"
-        $row.Green.Fill = $DimGray
-        $row.Red.Fill   = $DimGray
+        $row.Green.BackColor = $DimColor
+        $row.Red.BackColor   = $DimColor
         $row.Status = 'Unknown'
         return
     }
@@ -174,77 +211,74 @@ function Update-Row($row) {
     $row.Status = $svc.Status.ToString()
     switch ($svc.Status) {
         'Running' {
-            $row.Green.Fill = $RunningBrush
-            $row.Red.Fill   = $DimGray
+            $row.Green.BackColor = $RunningColor
+            $row.Red.BackColor   = $DimColor
         }
         'Stopped' {
-            $row.Green.Fill = $DimGray
-            $row.Red.Fill   = $StoppedBrush
+            $row.Green.BackColor = $DimColor
+            $row.Red.BackColor   = $StoppedColor
         }
         default {
-            $row.Green.Fill = $DimGray
-            $row.Red.Fill   = $DimGray
+            $row.Green.BackColor = $DimColor
+            $row.Red.BackColor   = $DimColor
         }
     }
     $row.Label.Text = $svc.DisplayName
-    $row.Green.ToolTip = "Start / Restart '$($svc.DisplayName)'  (currently: $($svc.Status))"
-    $row.Red.ToolTip   = "Stop '$($svc.DisplayName)'  (currently: $($svc.Status))"
+    $toolTip = $row.ToolTip
+    $toolTip.SetToolTip($row.Green, "Start / Restart '$($svc.DisplayName)'  (currently: $($svc.Status))")
+    $toolTip.SetToolTip($row.Red,   "Stop '$($svc.DisplayName)'  (currently: $($svc.Status))")
 }
 
 # ---------- build rows ----------
 $Rows = @()
+$sharedToolTip = New-Object System.Windows.Forms.ToolTip
+$y = $HeaderHeight + 6
 
 foreach ($name in $ServiceNames) {
-    $grid = New-Object System.Windows.Controls.Grid
-    $grid.Margin = '0,3,0,3'
-    foreach ($w in @('*', 'Auto', 'Auto')) {
-        $cd = New-Object System.Windows.Controls.ColumnDefinition
-        if ($w -eq '*') { $cd.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) }
-        else { $cd.Width = [System.Windows.GridLength]::Auto }
-        [void]$grid.ColumnDefinitions.Add($cd)
-    }
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text          = $name
+    $label.ForeColor     = $LabelColor
+    $label.AutoSize      = $false
+    $label.Width         = $WidgetWidth - $Padding - 44
+    $label.Height        = 18
+    $label.AutoEllipsis  = $true
+    $label.Location      = New-Object System.Drawing.Point($Padding, ($y + 1))
+    $form.Controls.Add($label)
 
-    $label = New-Object System.Windows.Controls.TextBlock
-    $label.Text = $name
-    $label.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(238, 238, 238))
-    $label.FontSize = 12
-    $label.VerticalAlignment = 'Center'
-    $label.TextTrimming = 'CharacterEllipsis'
-    [System.Windows.Controls.Grid]::SetColumn($label, 0)
+    $redEllipse = New-Light
+    $redEllipse.Location = New-Object System.Drawing.Point(($WidgetWidth - $Padding - 32), $y)
+    $form.Controls.Add($redEllipse)
 
-    $redEllipse = New-Ellipse
-    [System.Windows.Controls.Grid]::SetColumn($redEllipse, 1)
-
-    $greenEllipse = New-Ellipse
-    [System.Windows.Controls.Grid]::SetColumn($greenEllipse, 2)
-
-    [void]$grid.Children.Add($label)
-    [void]$grid.Children.Add($redEllipse)
-    [void]$grid.Children.Add($greenEllipse)
-    [void]$ServicesPanel.Children.Add($grid)
+    $greenEllipse = New-Light
+    $greenEllipse.Location = New-Object System.Drawing.Point(($WidgetWidth - $Padding - 14), $y)
+    $form.Controls.Add($greenEllipse)
 
     $row = [PSCustomObject]@{
-        Name   = $name
-        Label  = $label
-        Red    = $redEllipse
-        Green  = $greenEllipse
-        Status = 'Unknown'
+        Name    = $name
+        Label   = $label
+        Red     = $redEllipse
+        Green   = $greenEllipse
+        Status  = 'Unknown'
+        ToolTip = $sharedToolTip
     }
     $Rows += $row
 
-    $redEllipse.Tag = $row
+    $redEllipse.Tag   = $row
     $greenEllipse.Tag = $row
+
+    $y += $RowHeight
 }
+$form.Height = $y + $Padding
 
 foreach ($row in $Rows) {
-    $row.Red.Add_MouseLeftButtonUp({
+    $row.Red.Add_Click({
         param($s, $e)
         $r = $s.Tag
         try { Stop-Service -Name $r.Name -Force -ErrorAction Stop }
         catch { Show-Err "Could not stop '$($r.Name)':`n$($_.Exception.Message)" }
         Update-Row $r
     })
-    $row.Green.Add_MouseLeftButtonUp({
+    $row.Green.Add_Click({
         param($s, $e)
         $r = $s.Tag
         try {
@@ -260,11 +294,11 @@ foreach ($row in $Rows) {
 }
 
 # ---------- polling timer ----------
-$timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromMilliseconds($RefreshMs)
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = $RefreshMs
 $timer.Add_Tick({ foreach ($row in $Rows) { Update-Row $row } })
 $timer.Start()
 
-Write-Diag "Calling ShowDialog() now..."
-[void]$window.ShowDialog()
-Write-Diag "ShowDialog() returned - window was closed."
+Write-Diag "Calling Application.Run() now..."
+[System.Windows.Forms.Application]::Run($form)
+Write-Diag "Application.Run() returned - window was closed."
